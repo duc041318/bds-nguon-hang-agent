@@ -20,13 +20,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://agent:8000/message",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "X-Api-Token", "value": "={{ $env.API_TOKEN }}" }
-          ]
-        },
+        "url": "http://bds-agent:8000/message",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ text: $json.message.text }) }}",
