@@ -1,0 +1,41 @@
+# Chạy CẢ n8n + agent API trên 1 mạng Docker -> n8n gọi agent qua http://agent:8000
+# Nếu anh đã có n8n sẵn (template Hostinger), chỉ cần phần service `agent` và
+# nối nó vào đúng network của n8n (xem DEPLOY.md).
+
+services:
+  agent:
+    build: .
+    container_name: bds-agent
+    restart: unless-stopped
+    environment:
+      - API_TOKEN=${API_TOKEN}          # đặt trong file .env
+    volumes:
+      - ./data:/app/data                # giữ listings.json qua các lần restart
+    networks:
+      - bdsnet
+    # Không mở port ra ngoài nếu chỉ n8n nội bộ gọi. Bỏ comment để test từ ngoài:
+    # ports:
+    #   - "8000:8000"
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST}            # vd: n8n.tenmien.com hoặc IP VPS
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${N8N_HOST}/
+      - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - bdsnet
+
+networks:
+  bdsnet:
+
+volumes:
+  n8n_data:
