@@ -166,7 +166,12 @@ def search_listings(query):
         res.append(it)
     if not res:
         return "Không có nguồn nào khớp."
-    return f"Tìm thấy {len(res)} nguồn:\n" + "\n".join(_fmt(it, i + 1) for i, it in enumerate(res))
+    LIM = 15
+    n = len(res)
+    head = f"Tìm thấy {n} nguồn" + (f" (hiện {LIM} đầu):" if n > LIM else ":")
+    body = "\n".join(_fmt(it, i + 1) for i, it in enumerate(res[:LIM]))
+    tail = f"\n…còn {n - LIM} lô khác — lọc thêm bằng khu/giá/diện tích cho gọn." if n > LIM else ""
+    return head + "\n" + body + tail
 
 
 def stats():
