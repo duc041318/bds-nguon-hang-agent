@@ -139,8 +139,28 @@ def _fmt(it, idx=None):
     g = f"{it['gia_trieu']:.0f}tr" if it.get("gia_trieu") else "giá ?"
     dt = f"{it['dien_tich_m2']:.0f}m²" if it.get("dien_tich_m2") else "dt ?"
     parts = [p for p in [it.get("loai"), it.get("vi_tri"), dt, g, it.get("huong"), it.get("lien_he")] if p]
-    head = f"#{idx} " if idx is not None else ""
+    code = it.get("code")
+    head = f"[{code}] " if code else (f"#{idx} " if idx is not None else "")
     return head + " | ".join(str(p) for p in parts)
+
+
+def detail(code):
+    for it in load():
+        if it.get("code") == code:
+            d = it.get("detail") or {}
+            cv = (" · " + d["chuc_vu"]) if d.get("chuc_vu") else ""
+            return "\n".join([
+                f"📋 {code} — {d.get('loai','')}",
+                f"📍 {d.get('dia_chi','')}",
+                f"📐 DT: {d.get('dien_tich','?')}m² (thực {d.get('dt_thuc','?')}m²)",
+                f"💰 Giá: {d.get('gia','?')} tỷ",
+                f"📜 Sổ: {d.get('so') or '-'}",
+                f"👤 Đầu chủ: {d.get('dau_chu','')} — {d.get('sdt','')}",
+                f"🏢 {d.get('phong','')}{cv}",
+                f"🕒 Đăng: {d.get('ngay','')}",
+                f"🔗 {d.get('link','')}",
+            ])
+    return f"Không tìm thấy mã {code}."
 
 
 def add_listing(text):
@@ -190,6 +210,9 @@ def looks_like_listing(text):
 
 def handle(text):
     t = strip_accents(text)
+    m = re.search(r"\btk\s*0*(\d{1,5})\b", t)
+    if m:
+        return detail("TK%04d" % int(m.group(1)))
     if any(k in t for k in ["thong ke", "bao nhieu nguon", "co bao nhieu"]):
         return stats()
     if looks_like_listing(text):
