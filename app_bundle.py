@@ -111,27 +111,37 @@ def parse_listing(text):
             "vi_tri": parse_location(text), "lien_he": parse_phone(text)}
 
 
+_STOP = set("duoi tren khoang gia tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
+            "ty ti trieu tr m2 m dat nha can ho chung cu biet thu kho xuong huong dong tay nam bac "
+            "mat tien so do va o khu xa huyen thon duong cua nguon hang".split())
+
+
 def parse_query(text):
     t = strip_accents(text)
-    price = parse_price(text)
-    vi_tri = None
-    for p in PLACES:
-        if strip_accents(p) in t:
-            vi_tri = p.title(); break
-    if not vi_tri:
-        vi_tri = parse_location(text)
+    page = 1
+    mp = re.search(r"\btrang\s*(\d{1,3})\b", t)
+    if mp:
+        page = max(1, int(mp.group(1)))
     f = {"gia_max": None, "gia_min": None, "dt_min": None,
-         "loai": parse_type(text), "vi_tri": vi_tri, "huong": parse_direction(text)}
-    if price is not None:
-        if any(k in t for k in ["duoi", "<", "toi da", "khong qua", "tam", "ngan sach"]):
-            f["gia_max"] = price
-        elif any(k in t for k in ["tren", ">", "tu ", "it nhat"]):
-            f["gia_min"] = price
-        else:
-            f["gia_max"] = price
+         "loai": parse_type(text), "huong": parse_direction(text), "page": page, "loc_words": []}
+    # khoảng giá "X-Y tỷ" / "X đến Y tỷ"
+    rng = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*(ty|ti|trieu|tr)", t)
+    if rng:
+        lo = float(rng.group(1).replace(",", ".")); hi = float(rng.group(2).replace(",", "."))
+        mul = 1000 if rng.group(3) in ("ty", "ti") else 1
+        f["gia_min"], f["gia_max"] = lo * mul, hi * mul
+    else:
+        price = parse_price(text)
+        if price is not None:
+            if any(k in t for k in ["tren", ">", "tu ", "it nhat"]):
+                f["gia_min"] = price
+            else:
+                f["gia_max"] = price
     a = parse_area(text)
     if a is not None:
         f["dt_min"] = a
+    # địa danh / từ khoá còn lại (bỏ số, đơn vị, keyword) -> lọc theo raw
+    f["loc_words"] = [w for w in t.split() if len(w) >= 2 and not any(c.isdigit() for c in w) and w not in _STOP]
     return f
 
 
@@ -158,8 +168,9 @@ def detail(code):
                 f"👤 Đầu chủ: {d.get('dau_chu','')} — {d.get('sdt','')}",
                 f"🏢 {d.get('phong','')}{cv}",
                 f"🕒 Đăng: {d.get('ngay','')}",
+                f"🗺️ {d.get('maps','')}" if d.get("maps") else "",
                 f"🔗 {d.get('link','')}",
-            ])
+            ]).replace("\n\n", "\n")
     return f"Không tìm thấy mã {code}."
 
 
@@ -177,20 +188,24 @@ def search_listings(query):
             continue
         if f["dt_min"] is not None and (it.get("dien_tich_m2") is None or it["dien_tich_m2"] < f["dt_min"]):
             continue
-        if f["loai"] and strip_accents(f["loai"]) not in strip_accents(it.get("raw", "")):
-            continue
-        if f["vi_tri"] and strip_accents(f["vi_tri"]) not in strip_accents(it.get("raw", "")):
-            continue
         if f["huong"] and (not it.get("huong") or strip_accents(f["huong"]) not in strip_accents(it["huong"])):
+            continue
+        raw = strip_accents(it.get("raw", ""))
+        phrase = " ".join(f["loc_words"])
+        if phrase and phrase not in raw:
             continue
         res.append(it)
     if not res:
-        return "Không có nguồn nào khớp."
+        return "Không có nguồn nào khớp. Thử: 'sóc sơn 2-3 tỷ' hoặc nới điều kiện."
     LIM = 15
     n = len(res)
-    head = f"Tìm thấy {n} nguồn" + (f" (hiện {LIM} đầu):" if n > LIM else ":")
-    body = "\n".join(_fmt(it, i + 1) for i, it in enumerate(res[:LIM]))
-    tail = f"\n…còn {n - LIM} lô khác — lọc thêm bằng khu/giá/diện tích cho gọn." if n > LIM else ""
+    pages = (n + LIM - 1) // LIM
+    page = min(f.get("page", 1), pages)
+    off = (page - 1) * LIM
+    chunk = res[off:off + LIM]
+    head = f"Tìm thấy {n} nguồn — trang {page}/{pages}:"
+    body = "\n".join(_fmt(it) for it in chunk)
+    tail = f"\n→ Xem thêm: nhắn '{query.strip()} trang {page+1}'" if page < pages else ""
     return head + "\n" + body + tail
 
 
