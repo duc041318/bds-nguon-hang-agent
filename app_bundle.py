@@ -113,7 +113,8 @@ def parse_listing(text):
 
 _STOP = set("duoi tren khoang gia tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
             "ty ti trieu tr m2 m dat nha can ho chung cu biet thu kho xuong huong dong tay nam bac "
-            "mat tien so do va o khu xa huyen thon duong cua nguon hang".split())
+            "mat tien so do va o khu xa huyen thon duong cua nguon hang "
+            "khach khop nhu cau tu van goi y tim cho can muon".split())
 
 
 def parse_query(text):
@@ -122,7 +123,7 @@ def parse_query(text):
     mp = re.search(r"\btrang\s*(\d{1,3})\b", t)
     if mp:
         page = max(1, int(mp.group(1)))
-    f = {"gia_max": None, "gia_min": None, "dt_min": None,
+    f = {"gia_max": None, "gia_min": None, "dt_min": None, "dt_max": None,
          "loai": parse_type(text), "huong": parse_direction(text), "page": page, "loc_words": []}
     # khoảng giá "X-Y tỷ" / "X đến Y tỷ"
     rng = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*(ty|ti|trieu|tr)", t)
@@ -137,9 +138,14 @@ def parse_query(text):
                 f["gia_min"] = price
             else:
                 f["gia_max"] = price
-    a = parse_area(text)
-    if a is not None:
-        f["dt_min"] = a
+    ar = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*m(?!i)", t)
+    if ar:
+        f["dt_min"] = float(ar.group(1).replace(",", "."))
+        f["dt_max"] = float(ar.group(2).replace(",", "."))
+    else:
+        a = parse_area(text)
+        if a is not None:
+            f["dt_min"] = a
     # địa danh / từ khoá còn lại (bỏ số, đơn vị, keyword) -> lọc theo raw
     f["loc_words"] = [w for w in t.split() if len(w) >= 2 and not any(c.isdigit() for c in w) and w not in _STOP]
     return f
@@ -179,22 +185,30 @@ def add_listing(text):
     return "Đã lưu nguồn hàng: " + _fmt(rec)
 
 
-def search_listings(query):
-    items = load(); f = parse_query(query); res = []
+def _filter(items, f):
+    phrase = " ".join(f["loc_words"])
+    res = []
     for it in items:
-        if f["gia_max"] is not None and (it.get("gia_trieu") is None or it["gia_trieu"] > f["gia_max"]):
+        g = it.get("gia_trieu"); dt = it.get("dien_tich_m2")
+        if f["gia_max"] is not None and (g is None or g > f["gia_max"]):
             continue
-        if f["gia_min"] is not None and (it.get("gia_trieu") is None or it["gia_trieu"] < f["gia_min"]):
+        if f["gia_min"] is not None and (g is None or g < f["gia_min"]):
             continue
-        if f["dt_min"] is not None and (it.get("dien_tich_m2") is None or it["dien_tich_m2"] < f["dt_min"]):
+        if f["dt_min"] is not None and (dt is None or dt < f["dt_min"]):
+            continue
+        if f["dt_max"] is not None and (dt is None or dt > f["dt_max"]):
             continue
         if f["huong"] and (not it.get("huong") or strip_accents(f["huong"]) not in strip_accents(it["huong"])):
             continue
-        raw = strip_accents(it.get("raw", ""))
-        phrase = " ".join(f["loc_words"])
-        if phrase and phrase not in raw:
+        if phrase and phrase not in strip_accents(it.get("raw", "")):
             continue
         res.append(it)
+    return res
+
+
+def search_listings(query):
+    f = parse_query(query)
+    res = _filter(load(), f)
     if not res:
         return "Không có nguồn nào khớp. Thử: 'sóc sơn 2-3 tỷ' hoặc nới điều kiện."
     LIM = 15
@@ -202,10 +216,35 @@ def search_listings(query):
     pages = (n + LIM - 1) // LIM
     page = min(f.get("page", 1), pages)
     off = (page - 1) * LIM
-    chunk = res[off:off + LIM]
     head = f"Tìm thấy {n} nguồn — trang {page}/{pages}:"
-    body = "\n".join(_fmt(it) for it in chunk)
+    body = "\n".join(_fmt(it) for it in res[off:off + LIM])
     tail = f"\n→ Xem thêm: nhắn '{query.strip()} trang {page+1}'" if page < pages else ""
+    return head + "\n" + body + tail
+
+
+def match_customer(query):
+    f = parse_query(query)
+    items = load()
+    res = _filter(items, f)
+    relaxed = False
+    if not res and (f["gia_max"] or f["dt_min"] or f["dt_max"]):
+        if f["gia_max"]:
+            f["gia_max"] = f["gia_max"] * 1.15
+        if f["dt_min"]:
+            f["dt_min"] = f["dt_min"] * 0.9
+        if f["dt_max"]:
+            f["dt_max"] = f["dt_max"] * 1.1
+        res = _filter(items, f)
+        relaxed = True
+    if not res:
+        return "Chưa có lô nào khớp nhu cầu khách. Thử nới khu/giá/diện tích."
+    # xếp theo giá tăng dần (lô tốt giá mềm trước)
+    res.sort(key=lambda it: (it.get("gia_trieu") is None, it.get("gia_trieu") or 0))
+    LIM = 15
+    n = len(res)
+    head = f"🎯 {n} lô khớp nhu cầu khách" + (" (đã nới nhẹ điều kiện)" if relaxed else "") + " — xếp theo giá:"
+    body = "\n".join(_fmt(it) for it in res[:LIM])
+    tail = f"\n…còn {n - LIM} lô. Nhắn mã TK để xem chi tiết + SĐT đầu chủ." if n > LIM else "\nNhắn mã TK để xem chi tiết + SĐT đầu chủ."
     return head + "\n" + body + tail
 
 
@@ -230,7 +269,9 @@ def handle(text):
         return detail("TK%04d" % int(m.group(1)))
     if any(k in t for k in ["thong ke", "bao nhieu nguon", "co bao nhieu"]):
         return stats()
-    if looks_like_listing(text):
+    if any(k in t for k in ["khach", "khop", "nhu cau", "tu van", "goi y", "tim cho"]):
+        return match_customer(text)
+    if t.startswith(("luu ", "them tin", "rao ")):  # chỉ lưu khi có tiền tố rõ ràng
         return add_listing(text)
     return search_listings(text)
 
