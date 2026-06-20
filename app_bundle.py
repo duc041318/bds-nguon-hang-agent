@@ -142,30 +142,50 @@ def parse_query(text):
         page = max(1, int(mp.group(1)))
     f = {"gia_max": None, "gia_min": None, "dt_min": None, "dt_max": None,
          "loai": parse_type(text), "huong": parse_direction(text), "page": page,
-         "loc_words": [], "q_norm": t}
-    # khoảng giá "X-Y tỷ" / "X đến Y tỷ"
-    rng = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*(ty|ti|trieu|tr)", t)
+         "loc_words": [], "q_norm": t, "ppm_max": None, "co_so": False, "sort": None}
+    # giá/m²: "25tr/m2", "dưới 25/m²" -> ppm_max; tách khỏi câu để khỏi nhầm giá tổng
+    text2, t2 = text, t
+    mppm = re.search(r"(\d+[.,]?\d*)\s*(?:tr|trieu)?\s*/\s*m2?", t)
+    if mppm:
+        f["ppm_max"] = float(mppm.group(1).replace(",", "."))
+        t2 = t.replace(mppm.group(0), " ")
+        text2 = re.sub(r"(\d+[.,]?\d*)\s*(?:tr|trieu)?\s*/\s*m2?", " ", text, flags=re.I)
+    # khoảng giá "X-Y tỷ"
+    rng = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*(ty|ti|trieu|tr)", t2)
     if rng:
         lo = float(rng.group(1).replace(",", ".")); hi = float(rng.group(2).replace(",", "."))
         mul = 1000 if rng.group(3) in ("ty", "ti") else 1
         f["gia_min"], f["gia_max"] = lo * mul, hi * mul
     else:
-        price = parse_price(text)
+        price = parse_price(text2)
         if price is not None:
-            if any(k in t for k in ["tren", ">", "tu ", "it nhat"]):
+            if any(k in t2 for k in ["tren", ">", "tu ", "it nhat"]):
                 f["gia_min"] = price
             else:
                 f["gia_max"] = price
-    ar = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*m(?!i)", t)
+    ar = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*m(?!i)", t2)
     if ar:
         f["dt_min"] = float(ar.group(1).replace(",", "."))
         f["dt_max"] = float(ar.group(2).replace(",", "."))
     else:
-        a = parse_area(text)
+        a = parse_area(text2)
         if a is not None:
             f["dt_min"] = a
-    # địa danh / từ khoá còn lại (bỏ số, đơn vị, keyword) -> lọc theo raw
-    f["loc_words"] = [w for w in t.split() if len(w) >= 2 and not any(c.isdigit() for c in w) and w not in _STOP]
+    # lọc Sổ
+    if any(k in t for k in ["co so", "so do", "sodo", "co sd", "co sing"]):
+        f["co_so"] = True
+    # sắp xếp
+    if "re/m" in t or "re tren m" in t or "don gia re" in t:
+        f["sort"] = "ppm_asc"
+    elif "re nhat" in t or "gia thap" in t:
+        f["sort"] = "price_asc"
+    elif "dat nhat" in t or "gia cao" in t:
+        f["sort"] = "price_desc"
+    elif "to nhat" in t or "rong nhat" in t:
+        f["sort"] = "area_desc"
+    elif "nho nhat" in t:
+        f["sort"] = "area_asc"
+    f["loc_words"] = [w for w in t2.split() if len(w) >= 2 and not any(c.isdigit() for c in w) and w not in _STOP]
     return f
 
 
@@ -241,7 +261,27 @@ def _filter(items, f):
             continue
         if loc and loc not in strip_accents(it.get("raw", "")):
             continue
+        if f.get("ppm_max") is not None:
+            p = _ppm(it)
+            if p is None or p > f["ppm_max"]:
+                continue
+        if f.get("co_so") and not (it.get("detail") or {}).get("so"):
+            continue
         res.append(it)
+    return res
+
+
+def _apply_sort(res, sort):
+    if sort == "price_asc":
+        res.sort(key=lambda it: (it.get("gia_trieu") is None, it.get("gia_trieu") or 0))
+    elif sort == "price_desc":
+        res.sort(key=lambda it: it.get("gia_trieu") or 0, reverse=True)
+    elif sort == "area_desc":
+        res.sort(key=lambda it: it.get("dien_tich_m2") or 0, reverse=True)
+    elif sort == "area_asc":
+        res.sort(key=lambda it: (it.get("dien_tich_m2") is None, it.get("dien_tich_m2") or 0))
+    elif sort == "ppm_asc":
+        res.sort(key=lambda it: (_ppm(it) is None, _ppm(it) or 0))
     return res
 
 
@@ -251,13 +291,16 @@ def search_listings(query):
     res = _filter(items, f)
     if not res:
         return "Không có nguồn nào khớp. Thử: 'sóc sơn 2-3 tỷ' hoặc nới điều kiện."
+    _apply_sort(res, f.get("sort"))
     meds = area_medians(items)
     LIM = 15
     n = len(res)
     pages = (n + LIM - 1) // LIM
     page = min(f.get("page", 1), pages)
     off = (page - 1) * LIM
-    head = f"Tìm thấy {n} nguồn — trang {page}/{pages} (🔥=giá rẻ so với khu):"
+    sortlbl = {"price_asc": " · rẻ→đắt", "price_desc": " · đắt→rẻ", "area_desc": " · to→nhỏ",
+               "area_asc": " · nhỏ→to", "ppm_asc": " · rẻ/m²"}.get(f.get("sort"), "")
+    head = f"Tìm thấy {n} nguồn — trang {page}/{pages}{sortlbl} (🔥=rẻ so với khu):"
     body = "\n".join(_fmt(it, meds) for it in res[off:off + LIM])
     tail = f"\n→ Xem thêm: nhắn '{query.strip()} trang {page+1}'" if page < pages else ""
     return head + "\n" + body + tail
