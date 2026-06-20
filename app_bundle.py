@@ -8,6 +8,7 @@ import re, json, os, unicodedata
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 import uvicorn
+import statistics
 
 DB = "/app/data/listings.json"
 CUST_DB = "/app/data/customers.json"
@@ -115,7 +116,8 @@ def parse_listing(text):
 _STOP = set("duoi tren khoang gia tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
             "ty ti trieu tr m2 m dat nha can ho chung cu biet thu kho xuong huong dong tay nam bac "
             "mat tien so do va o khu xa huyen thon duong cua nguon hang "
-            "khach khop nhu cau tu van goi y tim cho can muon".split())
+            "khach khop nhu cau tu van goi y tim cho can muon "
+            "dinh re deal lo tb trung binh dat re mem hop ly".split())
 
 
 def parse_query(text):
@@ -152,32 +154,45 @@ def parse_query(text):
     return f
 
 
-def _fmt(it, idx=None):
+def _fmt(it, medians=None):
     g = f"{it['gia_trieu']:.0f}tr" if it.get("gia_trieu") else "giá ?"
     dt = f"{it['dien_tich_m2']:.0f}m²" if it.get("dien_tich_m2") else "dt ?"
     parts = [p for p in [it.get("loai"), it.get("vi_tri"), dt, g, it.get("huong"), it.get("lien_he")] if p]
+    flag = ""
+    if medians:
+        p = _ppm(it); m = medians.get(strip_accents(it.get("vi_tri", "")))
+        if p and m and p < 0.85 * m:
+            flag = "🔥"
     code = it.get("code")
-    head = f"[{code}] " if code else (f"#{idx} " if idx is not None else "")
+    head = (flag + f"[{code}] ") if code else ""
     return head + " | ".join(str(p) for p in parts)
 
 
 def detail(code):
-    for it in load():
+    items = load()
+    for it in items:
         if it.get("code") == code:
             d = it.get("detail") or {}
             cv = (" · " + d["chuc_vu"]) if d.get("chuc_vu") else ""
-            return "\n".join([
+            p = _ppm(it); m = area_medians(items).get(strip_accents(it.get("vi_tri", "")))
+            if p and m:
+                tag = "🔥 RẺ" if p < 0.85 * m else ("⬆️ cao" if p > 1.15 * m else "⚖️ hợp lý")
+                ppm_line = f"📊 {p:.1f} tr/m² (TB khu ~{m:.1f}) → {tag}"
+            else:
+                ppm_line = ""
+            return "\n".join(x for x in [
                 f"📋 {code} — {d.get('loai','')}",
                 f"📍 {d.get('dia_chi','')}",
                 f"📐 DT: {d.get('dien_tich','?')}m² (thực {d.get('dt_thuc','?')}m²)",
                 f"💰 Giá: {d.get('gia','?')} tỷ",
+                ppm_line,
                 f"📜 Sổ: {d.get('so') or '-'}",
                 f"👤 Đầu chủ: {d.get('dau_chu','')} — {d.get('sdt','')}",
                 f"🏢 {d.get('phong','')}{cv}",
                 f"🕒 Đăng: {d.get('ngay','')}",
                 f"🗺️ {d.get('maps','')}" if d.get("maps") else "",
                 f"🔗 {d.get('link','')}",
-            ]).replace("\n\n", "\n")
+            ] if x)
     return f"Không tìm thấy mã {code}."
 
 
@@ -209,16 +224,18 @@ def _filter(items, f):
 
 def search_listings(query):
     f = parse_query(query)
-    res = _filter(load(), f)
+    items = load()
+    res = _filter(items, f)
     if not res:
         return "Không có nguồn nào khớp. Thử: 'sóc sơn 2-3 tỷ' hoặc nới điều kiện."
+    meds = area_medians(items)
     LIM = 15
     n = len(res)
     pages = (n + LIM - 1) // LIM
     page = min(f.get("page", 1), pages)
     off = (page - 1) * LIM
-    head = f"Tìm thấy {n} nguồn — trang {page}/{pages}:"
-    body = "\n".join(_fmt(it) for it in res[off:off + LIM])
+    head = f"Tìm thấy {n} nguồn — trang {page}/{pages} (🔥=giá rẻ so với khu):"
+    body = "\n".join(_fmt(it, meds) for it in res[off:off + LIM])
     tail = f"\n→ Xem thêm: nhắn '{query.strip()} trang {page+1}'" if page < pages else ""
     return head + "\n" + body + tail
 
@@ -317,6 +334,59 @@ def scan_customers(new_codes=None):
     return title + "\n".join(out)
 
 
+def _ppm(it):
+    g = it.get("gia_trieu"); dt = it.get("dien_tich_m2")
+    return (g / dt) if (g and dt) else None
+
+
+def area_medians(items):
+    by = {}
+    for it in items:
+        p = _ppm(it)
+        if p:
+            by.setdefault(strip_accents(it.get("vi_tri", "")), []).append(p)
+    return {k: statistics.median(v) for k, v in by.items() if v}
+
+
+def _loc_sub(items, f):
+    phrase = " ".join(f["loc_words"])
+    return [it for it in items if (not phrase) or phrase in strip_accents(it.get("raw", ""))]
+
+
+def dinh_gia(query):
+    f = parse_query(query)
+    sub = _loc_sub(load(), f)
+    pp = sorted(p for p in (_ppm(it) for it in sub) if p)
+    if len(pp) < 3:
+        return "Không đủ dữ liệu để định giá khu này (cần khu cụ thể hơn)."
+    med = statistics.median(pp)
+    khu = " ".join(f["loc_words"]).title() or "toàn kho"
+    return (f"💰 Định giá {khu} ({len(pp)} lô):\n"
+            f"• Trung vị: ~{med:.1f} tr/m²\n"
+            f"• Thấp–cao: {pp[0]:.1f} – {pp[-1]:.1f} tr/m²\n"
+            f"→ Lô < {med*0.85:.1f} tr/m² là rẻ. Nhắn 'lô rẻ {khu}' để xem.")
+
+
+def lo_re(query):
+    f = parse_query(query)
+    items = load()
+    sub = _filter(items, f)  # áp cả lọc khu/giá/dt nếu có
+    if not sub:
+        sub = _loc_sub(items, f)
+    pp = sorted(p for p in (_ppm(it) for it in sub) if p)
+    if len(pp) < 3:
+        return "Không đủ dữ liệu."
+    med = statistics.median(pp); thr = med * 0.85
+    deals = sorted(((it, _ppm(it)) for it in sub if _ppm(it) and _ppm(it) < thr), key=lambda x: x[1])
+    if not deals:
+        return f"Không có lô rẻ bất thường (trung vị ~{med:.1f} tr/m²)."
+    khu = " ".join(f["loc_words"]).title() or "kho"
+    lines = [f"🔥 {it['code']} | {it.get('vi_tri','')} | {it.get('dien_tich_m2'):.0f}m² | "
+             f"{it.get('gia_trieu'):.0f}tr | {p:.1f}tr/m²" for it, p in deals[:15]]
+    return (f"🔥 Lô rẻ {khu} (< {thr:.1f} tr/m², trung vị {med:.1f}) — {len(deals)} lô:\n"
+            + "\n".join(lines) + "\nNhắn mã TK để xem chi tiết + SĐT.")
+
+
 def stats():
     items = load(); by = {}
     for it in items:
@@ -346,6 +416,10 @@ def handle(text):
         return list_customers()
     if "quet khach" in t:
         return scan_customers()
+    if any(k in t for k in ["lo re", "deal", "gia re"]):
+        return lo_re(text)
+    if any(k in t for k in ["dinh gia", "gia m2", "gia/m2", "gia tb", "trung binh", "dinh gia"]):
+        return dinh_gia(text)
     if any(k in t for k in ["khach", "khop", "nhu cau", "tu van", "goi y", "tim cho"]):
         return match_customer(text)
     if t.startswith(("luu ", "them tin", "rao ")):  # chỉ lưu khi có tiền tố rõ ràng
