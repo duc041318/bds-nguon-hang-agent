@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import uvicorn
 
 DB = "/app/data/listings.json"
+CUST_DB = "/app/data/customers.json"
 API_TOKEN = os.environ.get("API_TOKEN", "")
 
 
@@ -248,6 +249,74 @@ def match_customer(query):
     return head + "\n" + body + tail
 
 
+def load_customers():
+    if not os.path.exists(CUST_DB):
+        return []
+    try:
+        with open(CUST_DB, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_customers(cs):
+    os.makedirs(os.path.dirname(CUST_DB), exist_ok=True)
+    with open(CUST_DB, "w", encoding="utf-8") as f:
+        json.dump(cs, f, ensure_ascii=False, indent=1)
+
+
+def add_customer(text):
+    parts = text.split(None, 2)  # bỏ 2 từ đầu "lưu khách" (không phụ thuộc dấu)
+    raw = parts[2].strip() if len(parts) > 2 else ""
+    sep = "|" if "|" in raw else (":" if ":" in raw else None)
+    if not sep:
+        return "Cú pháp: lưu khách <tên> | <nhu cầu>\nVD: lưu khách Anh Tú | Sóc Sơn 80-100m2 dưới 2.5 tỷ"
+    name, need = [p.strip() for p in raw.split(sep, 1)]
+    if not name or not need:
+        return "Thiếu tên hoặc nhu cầu. VD: lưu khách Anh Tú | Sóc Sơn 80-100m2 dưới 2.5 tỷ"
+    cs = [c for c in load_customers() if strip_accents(c["name"]) != strip_accents(name)]
+    cs.append({"name": name, "need": need})
+    save_customers(cs)
+    return f"✅ Đã lưu khách '{name}': {need}\n(Nhắn 'quét khách' để tìm lô khớp.)"
+
+
+def list_customers():
+    cs = load_customers()
+    if not cs:
+        return "Chưa có khách nào. Lưu: lưu khách <tên> | <nhu cầu>"
+    return "👥 Khách đang theo dõi:\n" + "\n".join(f"• {c['name']}: {c['need']}" for c in cs)
+
+
+def del_customer(text):
+    parts = text.split(None, 2)  # bỏ "xoá khách"
+    name = parts[2].strip() if len(parts) > 2 else ""
+    cs = load_customers()
+    new = [c for c in cs if strip_accents(c["name"]) != strip_accents(name)]
+    if len(new) == len(cs):
+        return f"Không thấy khách '{name}'."
+    save_customers(new)
+    return f"🗑️ Đã xoá khách '{name}'."
+
+
+def scan_customers(new_codes=None):
+    cs = load_customers()
+    if not cs:
+        return "Chưa có khách nào để quét. Lưu: lưu khách <tên> | <nhu cầu>"
+    items = load()
+    pool = [it for it in items if it.get("code") in new_codes] if new_codes is not None else items
+    out = []
+    for c in cs:
+        res = _filter(pool, parse_query(c["need"]))
+        if res:
+            res.sort(key=lambda it: (it.get("gia_trieu") is None, it.get("gia_trieu") or 0))
+            top = ", ".join(it.get("code") for it in res[:5])
+            out.append(f"🔔 {c['name']} ({c['need']}): {len(res)} lô — {top}" + (" …" if len(res) > 5 else ""))
+        else:
+            out.append(f"— {c['name']}: chưa có lô khớp")
+    title = "🆕 LÔ MỚI KHỚP KHÁCH:\n" if new_codes is not None else "KẾT QUẢ QUÉT KHÁCH:\n"
+    return title + "\n".join(out)
+
+
 def stats():
     items = load(); by = {}
     for it in items:
@@ -269,6 +338,14 @@ def handle(text):
         return detail("TK%04d" % int(m.group(1)))
     if any(k in t for k in ["thong ke", "bao nhieu nguon", "co bao nhieu"]):
         return stats()
+    if t.startswith(("luu khach", "them khach")):
+        return add_customer(text)
+    if t.startswith(("xoa khach", "huy khach")):
+        return del_customer(text)
+    if any(k in t for k in ["ds khach", "danh sach khach", "list khach"]):
+        return list_customers()
+    if "quet khach" in t:
+        return scan_customers()
     if any(k in t for k in ["khach", "khop", "nhu cau", "tu van", "goi y", "tim cho"]):
         return match_customer(text)
     if t.startswith(("luu ", "them tin", "rao ")):  # chỉ lưu khi có tiền tố rõ ràng
