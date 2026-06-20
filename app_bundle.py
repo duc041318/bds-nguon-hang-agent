@@ -394,6 +394,32 @@ def stats():
     return f"Tổng {len(items)} nguồn. Theo loại: " + (", ".join(f"{k}: {v}" for k, v in by.items()) or "—")
 
 
+def digest():
+    items = load()
+    n = len(items)
+    by = {}
+    for it in items:
+        by[it.get("vi_tri") or "?"] = by.get(it.get("vi_tri") or "?", 0) + 1
+    top = sorted(by.items(), key=lambda x: -x[1])[:6]
+    meds = area_medians(items)
+    deals = 0
+    for it in items:
+        p = _ppm(it); m = meds.get(strip_accents(it.get("vi_tri", "")))
+        if p and m and p < 0.85 * m:
+            deals += 1
+    lines = [f"📊 DIGEST KHO BĐS — {n} nguồn",
+             "🏘️ Khu nhiều hàng: " + ", ".join(f"{k}({v})" for k, v in top)]
+    md = [f"{k} ~{meds[strip_accents(k)]:.0f}tr/m²" for k, _ in top[:4] if meds.get(strip_accents(k))]
+    if md:
+        lines.append("💰 Giá TB: " + ", ".join(md))
+    lines.append(f"🔥 Lô giá rẻ (dưới TB khu): {deals}")
+    cs = load_customers()
+    if cs:
+        lines.append(f"👥 {len(cs)} khách theo dõi — nhắn 'quét khách' để xem khớp.")
+    lines.append("Gõ: 'sóc sơn 2-3 tỷ' · 'lô rẻ sóc sơn 80-100m2' · 'định giá <khu>'")
+    return "\n".join(lines)
+
+
 def looks_like_listing(text):
     t = strip_accents(text)
     has_kw = any(k in t for k in ["ban ", "can ban", "chinh chu", "lien he", "lh ", "gia ", "dien tich", "dt ", "so do", "m2", "mat tien"])
@@ -406,6 +432,8 @@ def handle(text):
     m = re.search(r"\btk\s*0*(\d{1,5})\b", t)
     if m:
         return detail("TK%04d" % int(m.group(1)))
+    if any(k in t for k in ["digest", "bao cao", "tong hop"]):
+        return digest()
     if any(k in t for k in ["thong ke", "bao nhieu nguon", "co bao nhieu"]):
         return stats()
     if t.startswith(("luu khach", "them khach")):
