@@ -113,11 +113,25 @@ def parse_listing(text):
             "vi_tri": parse_location(text), "lien_he": parse_phone(text)}
 
 
-_STOP = set("duoi tren khoang gia tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
-            "ty ti trieu tr m2 m dat nha can ho chung cu biet thu kho xuong huong dong tay nam bac "
-            "mat tien so do va o khu xa huyen thon duong cua nguon hang "
-            "khach khop nhu cau tu van goi y tim cho can muon "
-            "dinh re deal lo tb trung binh dat re mem hop ly".split())
+# Stop-set AN TOÀN: chỉ chứa từ khoá KHÔNG bao giờ là tên địa danh
+# (KHÔNG để: trung, binh, gia, dinh, dong, tay, nam, bac, son... vì trùng tên xã/khu)
+_STOP = set("duoi tren khoang tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
+            "ty ti trieu tr m2 m mat tien va o "
+            "khach khop nhu cau van goi cho can muon deal".split())
+
+_PLACES = None
+
+
+def places_vocab(items):
+    global _PLACES
+    if _PLACES is None:
+        s = set()
+        for it in items:
+            for k in (it.get("vi_tri"), it.get("phuong_xa")):
+                if k and len(strip_accents(k)) >= 3:
+                    s.add(strip_accents(k))
+        _PLACES = sorted(s, key=len, reverse=True)  # khớp cụm dài trước
+    return _PLACES
 
 
 def parse_query(text):
@@ -127,7 +141,8 @@ def parse_query(text):
     if mp:
         page = max(1, int(mp.group(1)))
     f = {"gia_max": None, "gia_min": None, "dt_min": None, "dt_max": None,
-         "loai": parse_type(text), "huong": parse_direction(text), "page": page, "loc_words": []}
+         "loai": parse_type(text), "huong": parse_direction(text), "page": page,
+         "loc_words": [], "q_norm": t}
     # khoảng giá "X-Y tỷ" / "X đến Y tỷ"
     rng = re.search(r"(\d+[.,]?\d*)\s*(?:-|den|toi|->)\s*(\d+[.,]?\d*)\s*(ty|ti|trieu|tr)", t)
     if rng:
@@ -201,8 +216,16 @@ def add_listing(text):
     return "Đã lưu nguồn hàng: " + _fmt(rec)
 
 
+def _loc_of(f, items):
+    q = f.get("q_norm", "")
+    for pv in places_vocab(items):  # từ điển khu/xã có thật, cụm dài trước
+        if pv in q:
+            return pv
+    return " ".join(f.get("loc_words") or [])  # fallback free-text
+
+
 def _filter(items, f):
-    phrase = " ".join(f["loc_words"])
+    loc = _loc_of(f, items)
     res = []
     for it in items:
         g = it.get("gia_trieu"); dt = it.get("dien_tich_m2")
@@ -216,7 +239,7 @@ def _filter(items, f):
             continue
         if f["huong"] and (not it.get("huong") or strip_accents(f["huong"]) not in strip_accents(it["huong"])):
             continue
-        if phrase and phrase not in strip_accents(it.get("raw", "")):
+        if loc and loc not in strip_accents(it.get("raw", "")):
             continue
         res.append(it)
     return res
@@ -349,8 +372,8 @@ def area_medians(items):
 
 
 def _loc_sub(items, f):
-    phrase = " ".join(f["loc_words"])
-    return [it for it in items if (not phrase) or phrase in strip_accents(it.get("raw", ""))]
+    loc = _loc_of(f, items)
+    return [it for it in items if (not loc) or loc in strip_accents(it.get("raw", ""))]
 
 
 def dinh_gia(query):
@@ -360,7 +383,7 @@ def dinh_gia(query):
     if len(pp) < 3:
         return "Không đủ dữ liệu để định giá khu này (cần khu cụ thể hơn)."
     med = statistics.median(pp)
-    khu = " ".join(f["loc_words"]).title() or "toàn kho"
+    khu = (_loc_of(f, sub) or "toàn kho").title()
     return (f"💰 Định giá {khu} ({len(pp)} lô):\n"
             f"• Trung vị: ~{med:.1f} tr/m²\n"
             f"• Thấp–cao: {pp[0]:.1f} – {pp[-1]:.1f} tr/m²\n"
@@ -380,7 +403,7 @@ def lo_re(query):
     deals = sorted(((it, _ppm(it)) for it in sub if _ppm(it) and _ppm(it) < thr), key=lambda x: x[1])
     if not deals:
         return f"Không có lô rẻ bất thường (trung vị ~{med:.1f} tr/m²)."
-    khu = " ".join(f["loc_words"]).title() or "kho"
+    khu = (_loc_of(f, items) or "kho").title()
     lines = [f"🔥 {it['code']} | {it.get('vi_tri','')} | {it.get('dien_tich_m2'):.0f}m² | "
              f"{it.get('gia_trieu'):.0f}tr | {p:.1f}tr/m²" for it, p in deals[:15]]
     return (f"🔥 Lô rẻ {khu} (< {thr:.1f} tr/m², trung vị {med:.1f}) — {len(deals)} lô:\n"
