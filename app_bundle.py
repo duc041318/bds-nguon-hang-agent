@@ -117,7 +117,12 @@ def parse_listing(text):
 # (KHÔNG để: trung, binh, gia, dinh, dong, tay, nam, bac, son... vì trùng tên xã/khu)
 _STOP = set("duoi tren khoang tu den toi da khong qua tam ngan sach it nhat lo nao co tim trang tiep "
             "ty ti trieu tr m2 m mat tien va o "
-            "khach khop nhu cau van goi cho can muon deal".split())
+            "khach khop nhu cau van goi cho can muon deal "
+            "duong pho ngo ngach thon xom xa phuong huyen quan khu kdt to lo "  # tiền tố địa chỉ
+            "so sd nhat re dat cao thap rong moi nho lon gia don".split())  # từ sort/sổ/giá
+
+# Bí danh -> tên có trong kho (anh có thể bổ sung cặp old<->new)
+_ALIASES = {"san bay": "noi bai", "sb noi bai": "noi bai"}
 
 _PLACES = None
 
@@ -136,6 +141,8 @@ def places_vocab(items):
 
 def parse_query(text):
     t = strip_accents(text)
+    for k, v in _ALIASES.items():
+        t = t.replace(k, v)
     page = 1
     mp = re.search(r"\btrang\s*(\d{1,3})\b", t)
     if mp:
@@ -236,16 +243,26 @@ def add_listing(text):
     return "Đã lưu nguồn hàng: " + _fmt(rec)
 
 
-def _loc_of(f, items):
+def _loc_terms(f, items):
+    """Trả list cụm BẮT BUỘC có trong raw: [tên khu/xã (nếu có)] + [phần còn lại: đường/dự án/tên]."""
     q = f.get("q_norm", "")
-    for pv in places_vocab(items):  # từ điển khu/xã có thật, cụm dài trước
+    terms = []; used = q
+    for pv in places_vocab(items):  # từ điển khu/xã, cụm dài trước
         if pv in q:
-            return pv
-    return " ".join(f.get("loc_words") or [])  # fallback free-text
+            terms.append(pv); used = used.replace(pv, " "); break
+    leftover = [w for w in used.split() if len(w) >= 2 and not any(c.isdigit() for c in w) and w not in _STOP]
+    if leftover:
+        terms.append(" ".join(leftover))
+    return terms
+
+
+def _loc_label(f, items):
+    ts = _loc_terms(f, items)
+    return ts[0] if ts else ""
 
 
 def _filter(items, f):
-    loc = _loc_of(f, items)
+    terms = _loc_terms(f, items)
     res = []
     for it in items:
         g = it.get("gia_trieu"); dt = it.get("dien_tich_m2")
@@ -259,8 +276,10 @@ def _filter(items, f):
             continue
         if f["huong"] and (not it.get("huong") or strip_accents(f["huong"]) not in strip_accents(it["huong"])):
             continue
-        if loc and loc not in strip_accents(it.get("raw", "")):
-            continue
+        if terms:
+            raw = strip_accents(it.get("raw", ""))
+            if any(term not in raw for term in terms):
+                continue
         if f.get("ppm_max") is not None:
             p = _ppm(it)
             if p is None or p > f["ppm_max"]:
@@ -415,8 +434,10 @@ def area_medians(items):
 
 
 def _loc_sub(items, f):
-    loc = _loc_of(f, items)
-    return [it for it in items if (not loc) or loc in strip_accents(it.get("raw", ""))]
+    terms = _loc_terms(f, items)
+    if not terms:
+        return items
+    return [it for it in items if all(term in strip_accents(it.get("raw", "")) for term in terms)]
 
 
 def dinh_gia(query):
@@ -426,7 +447,7 @@ def dinh_gia(query):
     if len(pp) < 3:
         return "Không đủ dữ liệu để định giá khu này (cần khu cụ thể hơn)."
     med = statistics.median(pp)
-    khu = (_loc_of(f, sub) or "toàn kho").title()
+    khu = (_loc_label(f, sub) or "toàn kho").title()
     return (f"💰 Định giá {khu} ({len(pp)} lô):\n"
             f"• Trung vị: ~{med:.1f} tr/m²\n"
             f"• Thấp–cao: {pp[0]:.1f} – {pp[-1]:.1f} tr/m²\n"
@@ -446,7 +467,7 @@ def lo_re(query):
     deals = sorted(((it, _ppm(it)) for it in sub if _ppm(it) and _ppm(it) < thr), key=lambda x: x[1])
     if not deals:
         return f"Không có lô rẻ bất thường (trung vị ~{med:.1f} tr/m²)."
-    khu = (_loc_of(f, items) or "kho").title()
+    khu = (_loc_label(f, items) or "kho").title()
     lines = [f"🔥 {it['code']} | {it.get('vi_tri','')} | {it.get('dien_tich_m2'):.0f}m² | "
              f"{it.get('gia_trieu'):.0f}tr | {p:.1f}tr/m²" for it, p in deals[:15]]
     return (f"🔥 Lô rẻ {khu} (< {thr:.1f} tr/m², trung vị {med:.1f}) — {len(deals)} lô:\n"
