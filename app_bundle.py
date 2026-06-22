@@ -199,7 +199,8 @@ def parse_query(text):
 def _fmt(it, medians=None):
     g = f"{it['gia_trieu']:.0f}tr" if it.get("gia_trieu") else "giá ?"
     dt = f"{it['dien_tich_m2']:.0f}m²" if it.get("dien_tich_m2") else "dt ?"
-    parts = [p for p in [it.get("loai"), it.get("vi_tri"), dt, g, it.get("huong"), it.get("lien_he")] if p]
+    noi = it.get("phuong_xa") or it.get("vi_tri")
+    parts = [p for p in [it.get("loai"), noi, dt, g, it.get("huong"), it.get("lien_he")] if p]
     flag = ""
     if medians:
         p = _ppm(it); m = medians.get(strip_accents(it.get("vi_tri", "")))
